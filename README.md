@@ -2,14 +2,16 @@
 
 A local, stdio-based [Model Context Protocol](https://modelcontextprotocol.io/) server for Apple Mail on macOS.
 
-It is deliberately small: it talks only to the Apple Mail app already configured on the user's Mac. It does not need IMAP/SMTP passwords, open a network port, or send mailbox data to a third party.
+It talks only to the Apple Mail app already configured on the user's Mac. It does not need IMAP/SMTP passwords or open a network port.
 
 ## Safety model
 
-- `list_accounts` is read-only.
+- Mailbox and message tools are read-only by default.
 - `create_draft` opens an unsent, visible draft in Apple Mail.
 - `send_email` requires `user_approved: true`. MCP clients should call it only after the user has approved the exact message.
 - Dynamic content is passed to `osascript` as arguments, not interpolated into AppleScript source.
+
+The MCP server itself is local. However, an MCP client may send tool results to an AI model or another service. Only connect clients and models you trust with mail content.
 
 ## Requirements
 
@@ -48,12 +50,16 @@ Restart the MCP client after saving its configuration. The first call will trigg
 | Tool | What it does |
 | --- | --- |
 | `list_accounts` | Lists configured Apple Mail accounts and sender addresses. |
+| `list_mailboxes` | Lists the top-level mailboxes in an account. |
+| `list_messages` | Returns inbox or mailbox summaries without message bodies. |
+| `search_messages` | Searches recent messages by sender or subject. |
+| `get_message` | Reads one message body by id, with a configurable length limit. |
 | `create_draft` | Opens a visible, unsent outgoing message. |
 | `send_email` | Hands an approved message to Apple Mail for delivery. |
 
 ## Scope and non-goals
 
-This project is local-only. It is not an SMTP server, does not manage credentials, and does not bypass macOS privacy prompts. Inbox search and attachment tooling are intentionally out of scope for the first release, so the initial security surface stays small.
+This project is local-only. It is not an SMTP server, does not manage credentials, and does not bypass macOS privacy prompts. The initial release deliberately excludes deletion, archive, mailbox moves, attachment export, and automatic sending.
 
 ## License
 

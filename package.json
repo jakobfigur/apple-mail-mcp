@@ -1,6 +1,6 @@
 {
   "name": "apple-mail-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A local, approval-oriented MCP server for Apple Mail on macOS.",
   "author": "Jakob Figur",
   "repository": {
