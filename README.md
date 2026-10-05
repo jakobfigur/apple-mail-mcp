@@ -9,7 +9,9 @@ It talks only to the Apple Mail app already configured on the user's Mac. It doe
 - Mailbox and message tools are read-only by default.
 - `create_draft` opens an unsent, visible draft in Apple Mail.
 - `send_email` requires `user_approved: true`. MCP clients should call it only after the user has approved the exact message.
+- Message changes such as marking, flagging, and moving also require `user_approved: true`.
 - Dynamic content is passed to `osascript` as arguments, not interpolated into AppleScript source.
+- Every write action has a local, metadata-only JSONL audit entry. Bodies and credentials are never written to that log.
 
 The MCP server itself is local. However, an MCP client may send tool results to an AI model or another service. Only connect clients and models you trust with mail content.
 
@@ -45,6 +47,20 @@ Use the compiled server over stdio:
 
 Restart the MCP client after saving its configuration. The first call will trigger the normal macOS automation permission prompt.
 
+### Optional sender policy
+
+To allow sending only from specific configured Apple Mail addresses, configure a comma-separated allowlist when launching the server:
+
+```json
+{
+  "env": {
+    "APPLE_MAIL_MCP_ALLOWED_SENDERS": "hello@example.com"
+  }
+}
+```
+
+Write-action audit metadata is stored locally at `~/.apple-mail-mcp/audit.jsonl` by default. Set `APPLE_MAIL_MCP_AUDIT_LOG` to use another local path.
+
 ## Tools
 
 | Tool | What it does |
@@ -56,10 +72,15 @@ Restart the MCP client after saving its configuration. The first call will trigg
 | `get_message` | Reads one message body by id, with a configurable length limit. |
 | `create_draft` | Opens a visible, unsent outgoing message. |
 | `send_email` | Hands an approved message to Apple Mail for delivery. |
+| `create_reply_draft` | Opens a visible reply draft and preserves Apple Mail's reply recipient/subject handling. |
+| `set_message_read_status` | Marks one approved message read or unread. |
+| `set_message_flag_status` | Flags or unflags one approved message. |
+| `move_message` | Moves one approved message to another mailbox. |
+| `get_audit_log` | Reads the local metadata-only audit trail. |
 
 ## Scope and non-goals
 
-This project is local-only. It is not an SMTP server, does not manage credentials, and does not bypass macOS privacy prompts. The initial release deliberately excludes deletion, archive, mailbox moves, attachment export, and automatic sending.
+This project is local-only. It is not an SMTP server, does not manage credentials, and does not bypass macOS privacy prompts. It deliberately excludes deletion, attachment export, and automatic sending.
 
 ## License
 
