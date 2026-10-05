@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
-import { appendFile, mkdir, readFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { appendFile, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -9,12 +10,27 @@ import { z } from "zod";
 const DEFAULT_TIMEOUT_MS = 20_000;
 const FIELD_SEPARATOR = "\u001f";
 const AUDIT_LOG_PATH = process.env.APPLE_MAIL_MCP_AUDIT_LOG ?? resolve(homedir(), ".apple-mail-mcp", "audit.jsonl");
+const DATA_STORE_PATH = process.env.APPLE_MAIL_MCP_DATA_STORE ?? resolve(homedir(), ".apple-mail-mcp", "data.json");
 const ALLOWED_SENDERS = new Set(
   (process.env.APPLE_MAIL_MCP_ALLOWED_SENDERS ?? "")
     .split(",")
     .map((address) => address.trim().toLowerCase())
     .filter(Boolean),
 );
+const ALLOWED_RECIPIENTS = new Set(
+  (process.env.APPLE_MAIL_MCP_ALLOWED_RECIPIENTS ?? "")
+    .split(",")
+    .map((address) => address.trim().toLowerCase())
+    .filter(Boolean),
+);
+const ALLOWED_RECIPIENT_DOMAINS = new Set(
+  (process.env.APPLE_MAIL_MCP_ALLOWED_RECIPIENT_DOMAINS ?? "")
+    .split(",")
+    .map((domain) => domain.trim().toLowerCase().replace(/^@/, ""))
+    .filter(Boolean),
+);
+const DRY_RUN = process.env.APPLE_MAIL_MCP_DRY_RUN === "true";
+const SENDING_WINDOW = process.env.APPLE_MAIL_MCP_SENDING_WINDOW;
 
 function requireMacOS(): void {
   if (process.platform !== "darwin") {
@@ -307,10 +323,110 @@ function assertAllowedSender(from: string | undefined): void {
   }
 }
 
+function checkSendPolicy(to: string, from: string | undefined): string[] {
+  const issues: string[] = [];
+  try {
+    assertAllowedSender(from);
+  } catch (error) {
+    issues.push(error instanceof Error ? error.message : String(error));
+  }
+
+  const normalizedTo = to.toLowerCase();
+  const recipientDomain = normalizedTo.split("@")[1] ?? "";
+  if (ALLOWED_RECIPIENTS.size > 0 && !ALLOWED_RECIPIENTS.has(normalizedTo)) {
+    issues.push("This recipient is not permitted by APPLE_MAIL_MCP_ALLOWED_RECIPIENTS.");
+  }
+  if (ALLOWED_RECIPIENT_DOMAINS.size > 0 && !ALLOWED_RECIPIENT_DOMAINS.has(recipientDomain)) {
+    issues.push("This recipient domain is not permitted by APPLE_MAIL_MCP_ALLOWED_RECIPIENT_DOMAINS.");
+  }
+  if (SENDING_WINDOW && !isWithinSendingWindow(SENDING_WINDOW)) {
+    issues.push(`Sending is currently outside APPLE_MAIL_MCP_SENDING_WINDOW (${SENDING_WINDOW}).`);
+  }
+  return issues;
+}
+
+function isWithinSendingWindow(window: string): boolean {
+  const match = /^(\d{2}):(\d{2})-(\d{2}):(\d{2})$/.exec(window);
+  if (!match) return false;
+  const [, startHour, startMinute, endHour, endMinute] = match;
+  const start = Number(startHour) * 60 + Number(startMinute);
+  const end = Number(endHour) * 60 + Number(endMinute);
+  if (start > 1439 || end > 1439) return false;
+  const now = new Date();
+  const current = now.getHours() * 60 + now.getMinutes();
+  return start <= end ? current >= start && current <= end : current >= start || current <= end;
+}
+
 async function writeAudit(action: string, fields: Record<string, string | boolean | number | undefined>): Promise<void> {
   const entry = JSON.stringify({ timestamp: new Date().toISOString(), action, ...fields });
   await mkdir(dirname(AUDIT_LOG_PATH), { recursive: true });
   await appendFile(AUDIT_LOG_PATH, `${entry}\n`, "utf8");
+}
+
+type ApprovalStatus = "pending" | "completed" | "discarded";
+
+type ApprovalItem = {
+  id: string;
+  status: ApprovalStatus;
+  createdAt: string;
+  updatedAt: string;
+  to: string;
+  from?: string;
+  subject: string;
+  text: string;
+  note?: string;
+};
+
+type ContactTimelineEntry = {
+  at: string;
+  summary: string;
+  direction: "inbound" | "outbound" | "note";
+};
+
+type ContactContext = {
+  email: string;
+  displayName?: string;
+  relationship?: string;
+  tone?: string;
+  preferredLanguage?: string;
+  notes: string[];
+  openCommitments: string[];
+  followUpAt?: string;
+  timeline: ContactTimelineEntry[];
+  updatedAt: string;
+};
+
+type LocalState = {
+  version: 1;
+  approvals: ApprovalItem[];
+  contacts: Record<string, ContactContext>;
+};
+
+const EMPTY_STATE: LocalState = { version: 1, approvals: [], contacts: {} };
+
+async function readState(): Promise<LocalState> {
+  try {
+    const parsed = JSON.parse(await readFile(DATA_STORE_PATH, "utf8")) as Partial<LocalState>;
+    return {
+      version: 1,
+      approvals: Array.isArray(parsed.approvals) ? parsed.approvals : [],
+      contacts: parsed.contacts && typeof parsed.contacts === "object" ? parsed.contacts : {},
+    };
+  } catch (error: unknown) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return structuredClone(EMPTY_STATE);
+    throw error;
+  }
+}
+
+async function writeState(state: LocalState): Promise<void> {
+  await mkdir(dirname(DATA_STORE_PATH), { recursive: true });
+  const temporaryPath = `${DATA_STORE_PATH}.${process.pid}.tmp`;
+  await writeFile(temporaryPath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+  await rename(temporaryPath, DATA_STORE_PATH);
+}
+
+function statePathHint(): string {
+  return DATA_STORE_PATH.replace(homedir(), "~");
 }
 
 const server = new McpServer({
@@ -411,7 +527,12 @@ server.tool(
     user_approved: z.literal(true).describe("Must be true only after the user explicitly approved this exact email."),
   },
   async ({ to, subject, text, from }) => {
-    assertAllowedSender(from);
+    const policyIssues = checkSendPolicy(to, from);
+    if (policyIssues.length > 0) throw new Error(`Email was not sent: ${policyIssues.join(" ")}`);
+    if (DRY_RUN) {
+      await writeAudit("send_email_dry_run", { to, from, subjectLength: subject.length, bodyLength: text.length });
+      return textResult("Dry-run enabled: email was validated but not sent.");
+    }
     const output = await appleScript(sendMessageScript, [to, from ?? "", subject, text]);
     await writeAudit("send_email", { to, from, subjectLength: subject.length, bodyLength: text.length });
     return textResult(output);
@@ -490,6 +611,238 @@ server.tool(
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return textResult("No local audit log exists yet.");
       throw error;
     }
+  },
+);
+
+server.tool(
+  "get_send_policy",
+  "Show the active local sending safeguards without exposing credentials. Read-only.",
+  {},
+  async () =>
+    textResult(
+      JSON.stringify(
+        {
+          dryRun: DRY_RUN,
+          senderAllowlistEnabled: ALLOWED_SENDERS.size > 0,
+          recipientAllowlistEnabled: ALLOWED_RECIPIENTS.size > 0,
+          recipientDomainAllowlistEnabled: ALLOWED_RECIPIENT_DOMAINS.size > 0,
+          sendingWindow: SENDING_WINDOW ?? null,
+          auditLog: AUDIT_LOG_PATH.replace(homedir(), "~"),
+        },
+        null,
+        2,
+      ),
+    ),
+);
+
+server.tool(
+  "preview_send",
+  "Validate a proposed email against the active local send policy without creating or sending anything. Read-only.",
+  {
+    to: z.string().email(),
+    from: z.string().email().optional(),
+    subject: z.string().min(1).max(300),
+    text: z.string().min(1),
+  },
+  async ({ to, from, subject, text }) => {
+    const issues = checkSendPolicy(to, from);
+    return textResult(
+      JSON.stringify(
+        {
+          permitted: issues.length === 0,
+          dryRun: DRY_RUN,
+          to,
+          from: from ?? null,
+          subjectLength: subject.length,
+          bodyLength: text.length,
+          issues,
+        },
+        null,
+        2,
+      ),
+    );
+  },
+);
+
+server.tool(
+  "queue_email_for_approval",
+  "Save a proposed email in the local approval inbox. It does not create a Mail draft or send anything.",
+  {
+    to: z.string().email(),
+    from: z.string().email().optional(),
+    subject: z.string().min(1).max(300),
+    text: z.string().min(1),
+    note: z.string().max(1_000).optional().describe("Optional explanation of why this email is proposed."),
+  },
+  async ({ to, from, subject, text, note }) => {
+    assertAllowedSender(from);
+    const state = await readState();
+    const now = new Date().toISOString();
+    const item: ApprovalItem = { id: randomUUID(), status: "pending", createdAt: now, updatedAt: now, to, from, subject, text, note };
+    state.approvals.push(item);
+    await writeState(state);
+    await writeAudit("queue_email_for_approval", { itemId: item.id, to, from, subjectLength: subject.length, bodyLength: text.length });
+    return textResult(JSON.stringify({ id: item.id, status: item.status, storedAt: statePathHint() }, null, 2));
+  },
+);
+
+server.tool(
+  "list_approval_queue",
+  "List proposed emails in the local approval inbox. Read-only.",
+  {
+    status: z.enum(["pending", "completed", "discarded", "all"]).default("pending"),
+    limit: z.number().int().min(1).max(200).default(50),
+  },
+  async ({ status, limit }) => {
+    const state = await readState();
+    const items = state.approvals
+      .filter((item) => status === "all" || item.status === status)
+      .slice(-limit)
+      .map(({ text, ...item }) => ({ ...item, bodyLength: text.length }));
+    return textResult(JSON.stringify(items, null, 2));
+  },
+);
+
+server.tool(
+  "approve_queued_email",
+  "Turn one pending approval-queue item into a visible draft or send it. Only call after the user explicitly approved this exact item and delivery mode.",
+  {
+    item_id: z.string().uuid(),
+    delivery: z.enum(["draft", "send"]).describe("Create a visible draft or send the approved item."),
+    user_approved: z.literal(true).describe("Must be true only after the user explicitly approved this exact queue item and delivery mode."),
+  },
+  async ({ item_id, delivery }) => {
+    const state = await readState();
+    const item = state.approvals.find((candidate) => candidate.id === item_id);
+    if (!item) throw new Error("No approval item with that id exists.");
+    if (item.status !== "pending") throw new Error(`Approval item is already ${item.status}.`);
+
+    if (delivery === "send") {
+      const issues = checkSendPolicy(item.to, item.from);
+      if (issues.length > 0) throw new Error(`Email was not sent: ${issues.join(" ")}`);
+      if (DRY_RUN) {
+        await writeAudit("approve_queued_email_dry_run", { itemId: item.id, to: item.to, from: item.from });
+        return textResult("Dry-run enabled: queue item remains pending and was not sent.");
+      }
+      await appleScript(sendMessageScript, [item.to, item.from ?? "", item.subject, item.text]);
+    } else {
+      assertAllowedSender(item.from);
+      await appleScript(createDraftScript, [item.to, item.from ?? "", item.subject, item.text]);
+    }
+
+    item.status = "completed";
+    item.updatedAt = new Date().toISOString();
+    await writeState(state);
+    await writeAudit("approve_queued_email", { itemId: item.id, delivery, to: item.to, from: item.from });
+    return textResult(delivery === "send" ? "Approved email handed to Apple Mail for delivery." : "Approved email opened as a visible Apple Mail draft.");
+  },
+);
+
+server.tool(
+  "discard_queued_email",
+  "Discard one pending approval-queue item. It will not affect Apple Mail. Only call after explicit user approval.",
+  { item_id: z.string().uuid(), user_approved: z.literal(true) },
+  async ({ item_id }) => {
+    const state = await readState();
+    const item = state.approvals.find((candidate) => candidate.id === item_id);
+    if (!item) throw new Error("No approval item with that id exists.");
+    if (item.status !== "pending") throw new Error(`Approval item is already ${item.status}.`);
+    item.status = "discarded";
+    item.updatedAt = new Date().toISOString();
+    await writeState(state);
+    await writeAudit("discard_queued_email", { itemId: item.id, to: item.to, from: item.from });
+    return textResult("Approval item discarded. Apple Mail was not changed.");
+  },
+);
+
+const contactShape = {
+  email: z.string().email(),
+  display_name: z.string().max(200).optional(),
+  relationship: z.string().max(500).optional().describe("For example: prospect, client, partner, or colleague."),
+  tone: z.string().max(500).optional().describe("For example: concise and direct, or warm and detailed."),
+  preferred_language: z.string().max(100).optional(),
+  notes: z.array(z.string().min(1).max(2_000)).max(30).default([]),
+  open_commitments: z.array(z.string().min(1).max(2_000)).max(30).default([]),
+  follow_up_at: z.string().datetime().optional().describe("ISO-8601 date/time for a human-approved follow-up reminder."),
+};
+
+server.tool(
+  "save_contact_context",
+  "Save local relationship context for one contact. This does not modify Apple Mail or contact the person.",
+  {
+    ...contactShape,
+    timeline_summary: z.string().max(2_000).optional(),
+    timeline_direction: z.enum(["inbound", "outbound", "note"]).default("note"),
+    user_approved: z.literal(true).describe("Must be true only after the user approved saving this local contact context."),
+  },
+  async ({ email, display_name, relationship, tone, preferred_language, notes, open_commitments, follow_up_at, timeline_summary, timeline_direction }) => {
+    const state = await readState();
+    const key = email.toLowerCase();
+    const existing = state.contacts[key];
+    const timeline = existing?.timeline ?? [];
+    if (timeline_summary) timeline.push({ at: new Date().toISOString(), summary: timeline_summary, direction: timeline_direction });
+    state.contacts[key] = {
+      email: key,
+      displayName: display_name ?? existing?.displayName,
+      relationship: relationship ?? existing?.relationship,
+      tone: tone ?? existing?.tone,
+      preferredLanguage: preferred_language ?? existing?.preferredLanguage,
+      notes: notes.length > 0 ? notes : existing?.notes ?? [],
+      openCommitments: open_commitments.length > 0 ? open_commitments : existing?.openCommitments ?? [],
+      followUpAt: follow_up_at ?? existing?.followUpAt,
+      timeline: timeline.slice(-50),
+      updatedAt: new Date().toISOString(),
+    };
+    await writeState(state);
+    await writeAudit("save_contact_context", { email: key, timelineAdded: Boolean(timeline_summary) });
+    return textResult(JSON.stringify({ email: key, storedAt: statePathHint() }, null, 2));
+  },
+);
+
+server.tool(
+  "get_contact_context",
+  "Read the local relationship context for one email address. Read-only.",
+  { email: z.string().email() },
+  async ({ email }) => {
+    const state = await readState();
+    const contact = state.contacts[email.toLowerCase()];
+    return textResult(JSON.stringify(contact ?? { email: email.toLowerCase(), exists: false }, null, 2));
+  },
+);
+
+server.tool(
+  "get_contact_brief",
+  "Build a local contact brief from saved relationship context and recent inbox summaries. Read-only; message bodies are excluded.",
+  {
+    email: z.string().email(),
+    account: z.string().min(1),
+    mailbox: z.string().min(1).default("INBOX"),
+    limit: z.number().int().min(1).max(50).default(10),
+  },
+  async ({ email, account, mailbox, limit }) => {
+    const state = await readState();
+    const output = await appleScript(searchMessagesScript, [account, mailbox, email, String(limit), "500"]);
+    return textResult(
+      JSON.stringify(
+        { context: state.contacts[email.toLowerCase()] ?? null, recentMessages: parseMessageSummaries(output) },
+        null,
+        2,
+      ),
+    );
+  },
+);
+
+server.tool(
+  "list_follow_up_radar",
+  "List local contact records with a follow-up date due now or within a chosen horizon. Read-only; it never sends anything.",
+  { within_days: z.number().int().min(0).max(365).default(7) },
+  async ({ within_days }) => {
+    const state = await readState();
+    const deadline = new Date(Date.now() + within_days * 24 * 60 * 60 * 1000);
+    const contacts = Object.values(state.contacts)
+      .filter((contact) => contact.followUpAt && new Date(contact.followUpAt) <= deadline)
+      .sort((left, right) => (left.followUpAt ?? "").localeCompare(right.followUpAt ?? ""));
+    return textResult(JSON.stringify(contacts, null, 2));
   },
 );
 

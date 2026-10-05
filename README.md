@@ -12,6 +12,7 @@ It talks only to the Apple Mail app already configured on the user's Mac. It doe
 - Message changes such as marking, flagging, and moving also require `user_approved: true`.
 - Dynamic content is passed to `osascript` as arguments, not interpolated into AppleScript source.
 - Every write action has a local, metadata-only JSONL audit entry. Bodies and credentials are never written to that log.
+- The approval inbox and relationship context are stored only in the local JSON data store described below.
 
 The MCP server itself is local. However, an MCP client may send tool results to an AI model or another service. Only connect clients and models you trust with mail content.
 
@@ -61,6 +62,12 @@ To allow sending only from specific configured Apple Mail addresses, configure a
 
 Write-action audit metadata is stored locally at `~/.apple-mail-mcp/audit.jsonl` by default. Set `APPLE_MAIL_MCP_AUDIT_LOG` to use another local path.
 
+### AI-first local workspace
+
+The approval inbox and relationship context share a local JSON store at `~/.apple-mail-mcp/data.json` by default. It contains queued draft bodies and the contact notes you intentionally save, so treat it as private mail data. Set `APPLE_MAIL_MCP_DATA_STORE` to use another local path.
+
+`APPLE_MAIL_MCP_DRY_RUN=true` validates sends but prevents delivery. You can also enforce recipient restrictions with `APPLE_MAIL_MCP_ALLOWED_RECIPIENTS`, `APPLE_MAIL_MCP_ALLOWED_RECIPIENT_DOMAINS`, and a local time window such as `APPLE_MAIL_MCP_SENDING_WINDOW=09:00-18:00`.
+
 ## Tools
 
 | Tool | What it does |
@@ -77,10 +84,16 @@ Write-action audit metadata is stored locally at `~/.apple-mail-mcp/audit.jsonl`
 | `set_message_flag_status` | Flags or unflags one approved message. |
 | `move_message` | Moves one approved message to another mailbox. |
 | `get_audit_log` | Reads the local metadata-only audit trail. |
+| `get_send_policy` / `preview_send` | Inspects or validates the active send safeguards without delivery. |
+| `queue_email_for_approval` / `list_approval_queue` | Stores proposed emails locally for human review. |
+| `approve_queued_email` / `discard_queued_email` | Applies an explicitly approved queue decision. |
+| `save_contact_context` / `get_contact_context` | Maintains private relationship notes, tone, commitments, and follow-up dates. |
+| `get_contact_brief` | Combines a saved contact profile with recent inbox summaries. |
+| `list_follow_up_radar` | Surfaces saved contacts that are due for a human-approved follow-up. |
 
 ## Scope and non-goals
 
-This project is local-only. It is not an SMTP server, does not manage credentials, and does not bypass macOS privacy prompts. It deliberately excludes deletion, attachment export, and automatic sending.
+This project is local-only. It is not an SMTP server, does not manage credentials, and does not bypass macOS privacy prompts. It deliberately excludes deletion, attachment export, background scheduling, and automatic sending.
 
 ## License
 
