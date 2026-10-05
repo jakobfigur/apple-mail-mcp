@@ -364,6 +364,7 @@ async function writeAudit(action: string, fields: Record<string, string | boolea
 }
 
 type ApprovalStatus = "pending" | "completed" | "discarded";
+type WorkMode = "general" | "inbox_zero" | "sales_follow_up" | "support" | "deep_work";
 
 type ApprovalItem = {
   id: string;
@@ -375,12 +376,23 @@ type ApprovalItem = {
   subject: string;
   text: string;
   note?: string;
+  intent?: string;
+  rationale?: string;
+  tone?: string;
+  risks: string[];
+  sourceMessageIds: string[];
 };
 
 type ContactTimelineEntry = {
   at: string;
   summary: string;
   direction: "inbound" | "outbound" | "note";
+};
+
+type ThreadSummary = {
+  createdAt: string;
+  summary: string;
+  sourceMessageIds: string[];
 };
 
 type ContactContext = {
@@ -393,6 +405,7 @@ type ContactContext = {
   openCommitments: string[];
   followUpAt?: string;
   timeline: ContactTimelineEntry[];
+  threadSummaries: ThreadSummary[];
   updatedAt: string;
 };
 
@@ -400,9 +413,10 @@ type LocalState = {
   version: 1;
   approvals: ApprovalItem[];
   contacts: Record<string, ContactContext>;
+  workMode: WorkMode;
 };
 
-const EMPTY_STATE: LocalState = { version: 1, approvals: [], contacts: {} };
+const EMPTY_STATE: LocalState = { version: 1, approvals: [], contacts: {}, workMode: "general" };
 
 async function readState(): Promise<LocalState> {
   try {
@@ -411,10 +425,28 @@ async function readState(): Promise<LocalState> {
       version: 1,
       approvals: Array.isArray(parsed.approvals) ? parsed.approvals : [],
       contacts: parsed.contacts && typeof parsed.contacts === "object" ? parsed.contacts : {},
+      workMode: isWorkMode(parsed.workMode) ? parsed.workMode : "general",
     };
   } catch (error: unknown) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return structuredClone(EMPTY_STATE);
     throw error;
+  }
+}
+
+function isWorkMode(value: unknown): value is WorkMode {
+  return value === "general" || value === "inbox_zero" || value === "sales_follow_up" || value === "support" || value === "deep_work";
+}
+
+function assertWorkModeAllows(mode: WorkMode, action: "queue" | "draft" | "send"): void {
+  const allowed: Record<WorkMode, Array<"queue" | "draft" | "send">> = {
+    general: ["queue", "draft", "send"],
+    inbox_zero: ["queue", "draft"],
+    sales_follow_up: ["queue", "draft", "send"],
+    support: ["queue", "draft", "send"],
+    deep_work: [],
+  };
+  if (!allowed[mode].includes(action)) {
+    throw new Error(`The active ${mode} work mode does not permit ${action} actions through MCP.`);
   }
 }
 
@@ -510,6 +542,8 @@ server.tool(
   },
   async ({ to, subject, text, from }) => {
     assertAllowedSender(from);
+    const state = await readState();
+    assertWorkModeAllows(state.workMode, "draft");
     const output = await appleScript(createDraftScript, [to, from ?? "", subject, text]);
     await writeAudit("create_draft", { to, from, subjectLength: subject.length, bodyLength: text.length });
     return textResult(output);
@@ -527,6 +561,8 @@ server.tool(
     user_approved: z.literal(true).describe("Must be true only after the user explicitly approved this exact email."),
   },
   async ({ to, subject, text, from }) => {
+    const state = await readState();
+    assertWorkModeAllows(state.workMode, "send");
     const policyIssues = checkSendPolicy(to, from);
     if (policyIssues.length > 0) throw new Error(`Email was not sent: ${policyIssues.join(" ")}`);
     if (DRY_RUN) {
@@ -549,6 +585,8 @@ server.tool(
     text: z.string().min(1).describe("Reply text to place above Apple Mail's quoted original message."),
   },
   async ({ account, mailbox, message_id, text }) => {
+    const state = await readState();
+    assertWorkModeAllows(state.workMode, "draft");
     const output = await appleScript(createReplyDraftScript, [account, mailbox, message_id, text]);
     await writeAudit("create_reply_draft", { account, mailbox, messageId: message_id, bodyLength: text.length });
     return textResult(output);
@@ -672,13 +710,21 @@ server.tool(
     from: z.string().email().optional(),
     subject: z.string().min(1).max(300),
     text: z.string().min(1),
-    note: z.string().max(1_000).optional().describe("Optional explanation of why this email is proposed."),
+    note: z.string().max(1_000).optional().describe("Optional human-facing note."),
+    intent: z.string().max(500).optional().describe("Desired outcome, such as booking a discovery call or resolving a support request."),
+    rationale: z.string().max(2_000).optional().describe("Why this action and timing are appropriate, grounded in known context."),
+    tone: z.string().max(500).optional().describe("Proposed tone, such as concise and collaborative."),
+    risks: z.array(z.string().min(1).max(1_000)).max(10).default([]).describe("Known uncertainties or reasons to review carefully."),
+    source_message_ids: z.array(z.string().min(1)).max(30).default([]).describe("Message ids used as evidence for the proposal."),
   },
-  async ({ to, from, subject, text, note }) => {
+  async ({ to, from, subject, text, note, intent, rationale, tone, risks, source_message_ids }) => {
     assertAllowedSender(from);
     const state = await readState();
+    assertWorkModeAllows(state.workMode, "queue");
     const now = new Date().toISOString();
-    const item: ApprovalItem = { id: randomUUID(), status: "pending", createdAt: now, updatedAt: now, to, from, subject, text, note };
+    const item: ApprovalItem = {
+      id: randomUUID(), status: "pending", createdAt: now, updatedAt: now, to, from, subject, text, note, intent, rationale, tone, risks, sourceMessageIds: source_message_ids,
+    };
     state.approvals.push(item);
     await writeState(state);
     await writeAudit("queue_email_for_approval", { itemId: item.id, to, from, subjectLength: subject.length, bodyLength: text.length });
@@ -698,7 +744,7 @@ server.tool(
     const items = state.approvals
       .filter((item) => status === "all" || item.status === status)
       .slice(-limit)
-      .map(({ text, ...item }) => ({ ...item, bodyLength: text.length }));
+      .map(({ text, risks = [], sourceMessageIds = [], ...item }) => ({ ...item, risks, sourceMessageIds, bodyLength: text.length }));
     return textResult(JSON.stringify(items, null, 2));
   },
 );
@@ -718,6 +764,7 @@ server.tool(
     if (item.status !== "pending") throw new Error(`Approval item is already ${item.status}.`);
 
     if (delivery === "send") {
+      assertWorkModeAllows(state.workMode, "send");
       const issues = checkSendPolicy(item.to, item.from);
       if (issues.length > 0) throw new Error(`Email was not sent: ${issues.join(" ")}`);
       if (DRY_RUN) {
@@ -726,6 +773,7 @@ server.tool(
       }
       await appleScript(sendMessageScript, [item.to, item.from ?? "", item.subject, item.text]);
     } else {
+      assertWorkModeAllows(state.workMode, "draft");
       assertAllowedSender(item.from);
       await appleScript(createDraftScript, [item.to, item.from ?? "", item.subject, item.text]);
     }
@@ -791,6 +839,7 @@ server.tool(
       openCommitments: open_commitments.length > 0 ? open_commitments : existing?.openCommitments ?? [],
       followUpAt: follow_up_at ?? existing?.followUpAt,
       timeline: timeline.slice(-50),
+      threadSummaries: existing?.threadSummaries ?? [],
       updatedAt: new Date().toISOString(),
     };
     await writeState(state);
@@ -843,6 +892,112 @@ server.tool(
       .filter((contact) => contact.followUpAt && new Date(contact.followUpAt) <= deadline)
       .sort((left, right) => (left.followUpAt ?? "").localeCompare(right.followUpAt ?? ""));
     return textResult(JSON.stringify(contacts, null, 2));
+  },
+);
+
+server.tool(
+  "get_work_mode",
+  "Show the active local AI-mail work mode and its allowed MCP actions. Read-only.",
+  {},
+  async () => {
+    const state = await readState();
+    const permissions: Record<WorkMode, string[]> = {
+      general: ["queue", "draft", "send"],
+      inbox_zero: ["queue", "draft"],
+      sales_follow_up: ["queue", "draft", "send"],
+      support: ["queue", "draft", "send"],
+      deep_work: [],
+    };
+    return textResult(JSON.stringify({ mode: state.workMode, allowedActions: permissions[state.workMode] }, null, 2));
+  },
+);
+
+server.tool(
+  "set_work_mode",
+  "Set the local AI-mail work mode. The mode controls whether this MCP may queue, draft, or send. This does not change Apple Mail.",
+  {
+    mode: z.enum(["general", "inbox_zero", "sales_follow_up", "support", "deep_work"]),
+    user_approved: z.literal(true).describe("Must be true only after the user explicitly approved the mode change."),
+  },
+  async ({ mode }) => {
+    const state = await readState();
+    state.workMode = mode;
+    await writeState(state);
+    await writeAudit("set_work_mode", { mode });
+    return textResult(`Work mode set to ${mode}.`);
+  },
+);
+
+server.tool(
+  "save_thread_summary",
+  "Save a local, user-approved summary of a selected contact thread, including the exact source message ids used. It does not modify Apple Mail.",
+  {
+    email: z.string().email(),
+    summary: z.string().min(1).max(8_000),
+    source_message_ids: z.array(z.string().min(1)).min(1).max(50),
+    user_approved: z.literal(true).describe("Must be true only after the user approved saving this local thread summary."),
+  },
+  async ({ email, summary, source_message_ids }) => {
+    const state = await readState();
+    const key = email.toLowerCase();
+    const existing = state.contacts[key];
+    const threadSummaries = [...(existing?.threadSummaries ?? []), { createdAt: new Date().toISOString(), summary, sourceMessageIds: source_message_ids }].slice(-20);
+    state.contacts[key] = {
+      email: key,
+      displayName: existing?.displayName,
+      relationship: existing?.relationship,
+      tone: existing?.tone,
+      preferredLanguage: existing?.preferredLanguage,
+      notes: existing?.notes ?? [],
+      openCommitments: existing?.openCommitments ?? [],
+      followUpAt: existing?.followUpAt,
+      timeline: existing?.timeline ?? [],
+      threadSummaries,
+      updatedAt: new Date().toISOString(),
+    };
+    await writeState(state);
+    await writeAudit("save_thread_summary", { email: key, sourceCount: source_message_ids.length, summaryLength: summary.length });
+    return textResult(JSON.stringify({ email: key, summaryCount: threadSummaries.length, storedAt: statePathHint() }, null, 2));
+  },
+);
+
+server.tool(
+  "get_daily_briefing",
+  "Create a read-only daily briefing from one inbox, the local approval queue, and saved follow-up dates. It never drafts, sends, or changes email.",
+  {
+    account: z.string().min(1).describe("Apple Mail account name."),
+    mailbox: z.string().min(1).default("INBOX"),
+    unread_limit: z.number().int().min(1).max(50).default(10),
+    follow_up_days: z.number().int().min(0).max(30).default(7),
+  },
+  async ({ account, mailbox, unread_limit, follow_up_days }) => {
+    const state = await readState();
+    const unreadOutput = await appleScript(listMessagesScript, [account, mailbox, String(unread_limit), "true"]);
+    const deadline = new Date(Date.now() + follow_up_days * 24 * 60 * 60 * 1000);
+    const followUps = Object.values(state.contacts)
+      .filter((contact) => contact.followUpAt && new Date(contact.followUpAt) <= deadline)
+      .sort((left, right) => (left.followUpAt ?? "").localeCompare(right.followUpAt ?? ""));
+    const pending = state.approvals.filter((item) => item.status === "pending");
+    const recommendedNextSteps: string[] = [];
+    if (pending.length > 0) recommendedNextSteps.push(`Review ${pending.length} approval-queue item${pending.length === 1 ? "" : "s"}.`);
+    if (followUps.length > 0) recommendedNextSteps.push(`Review ${followUps.length} follow-up${followUps.length === 1 ? "" : "s"} due within ${follow_up_days} day${follow_up_days === 1 ? "" : "s"}.`);
+    if (parseMessageSummaries(unreadOutput).length > 0) recommendedNextSteps.push("Review unread messages and decide whether to draft, queue, or defer.");
+    if (recommendedNextSteps.length === 0) recommendedNextSteps.push("No queued approvals, due follow-ups, or unread messages were found in this briefing scope.");
+
+    return textResult(
+      JSON.stringify(
+        {
+          generatedAt: new Date().toISOString(),
+          workMode: state.workMode,
+          inbox: { account, mailbox, unreadMessages: parseMessageSummaries(unreadOutput) },
+          approvalQueue: pending.map(({ text, ...item }) => ({ ...item, bodyLength: text.length })),
+          followUps,
+          recommendedNextSteps,
+        },
+        null,
+        2,
+      ),
+    );
   },
 );
 

@@ -90,6 +90,9 @@ The approval inbox and relationship context share a local JSON store at `~/.appl
 | `save_contact_context` / `get_contact_context` | Maintains private relationship notes, tone, commitments, and follow-up dates. |
 | `get_contact_brief` | Combines a saved contact profile with recent inbox summaries. |
 | `list_follow_up_radar` | Surfaces saved contacts that are due for a human-approved follow-up. |
+| `get_work_mode` / `set_work_mode` | Switches between focused policies such as inbox zero, sales follow-up, support, and deep work. |
+| `save_thread_summary` | Saves a user-approved local thread summary with its source message ids. |
+| `get_daily_briefing` | Combines unread messages, pending approvals, and due follow-ups into a safe daily action brief. |
 
 ## Scope and non-goals
 
