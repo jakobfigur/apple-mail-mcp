@@ -1,0 +1,22 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.jakobfigur/apple-mail-mcp",
+  "title": "Apple Mail MCP",
+  "description": "A privacy-first, local MCP server for Apple Mail on macOS. Read inbox context, prepare drafts, keep approvals and follow-ups local, and require human control for real actions.",
+  "version": "0.6.0",
+  "repository": {
+    "url": "https://github.com/jakobfigur/apple-mail-mcp",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "@jakobfigur/apple-mail-mcp",
+      "version": "0.6.0",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

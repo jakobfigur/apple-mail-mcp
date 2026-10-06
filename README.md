@@ -24,6 +24,26 @@ The MCP server itself is local. However, an MCP client may send tool results to 
 
 ## Install
 
+### npm (recommended)
+
+```bash
+npm install -g @jakobfigur/apple-mail-mcp
+```
+
+Then configure your MCP client with the installed command:
+
+```json
+{
+  "mcpServers": {
+    "apple-mail": {
+      "command": "apple-mail-mcp"
+    }
+  }
+}
+```
+
+### From source
+
 ```bash
 git clone https://github.com/YOUR_ACCOUNT/apple-mail-mcp.git
 cd apple-mail-mcp
@@ -33,7 +53,7 @@ npm run build
 
 ## Add to an MCP client
 
-Use the compiled server over stdio:
+If you installed from source rather than npm, use the compiled server over stdio:
 
 ```json
 {
@@ -97,6 +117,10 @@ The approval inbox and relationship context share a local JSON store at `~/.appl
 ## Scope and non-goals
 
 This project is local-only. It is not an SMTP server, does not manage credentials, and does not bypass macOS privacy prompts. It deliberately excludes deletion, attachment export, background scheduling, and automatic sending.
+
+## Publishing and registry metadata
+
+The package is published as `@jakobfigur/apple-mail-mcp`. Its MCP Registry identity is `io.github.jakobfigur/apple-mail-mcp`; see [`server.json`](server.json) for portable install metadata.
 
 ## License
 

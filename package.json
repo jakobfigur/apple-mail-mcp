@@ -1,7 +1,8 @@
 {
-  "name": "apple-mail-mcp",
-  "version": "0.5.0",
-  "description": "A local, approval-oriented MCP server for Apple Mail on macOS.",
+  "name": "@jakobfigur/apple-mail-mcp",
+  "version": "0.6.0",
+  "description": "A privacy-first, local MCP server for Apple Mail on macOS.",
+  "mcpName": "io.github.jakobfigur/apple-mail-mcp",
   "author": "Jakob Figur",
   "repository": {
     "type": "git",
@@ -12,17 +13,31 @@
   },
   "homepage": "https://github.com/jakobfigur/apple-mail-mcp#readme",
   "type": "module",
+  "bin": {
+    "apple-mail-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "server.json"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "dev": "tsx src/index.ts",
     "start": "node dist/index.js",
-    "check": "npm run build"
+    "check": "npm run build",
+    "prepack": "npm run build"
   },
   "keywords": [
     "mcp",
+    "model-context-protocol",
     "apple-mail",
     "macos",
-    "email"
+    "email-automation",
+    "ai-agents",
+    "privacy-first",
+    "local-first"
   ],
   "license": "MIT",
   "engines": {
