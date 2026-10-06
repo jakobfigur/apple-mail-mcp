@@ -1,6 +1,6 @@
 {
   "name": "@jakobfigur/apple-mail-mcp",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "A privacy-first, local MCP server for Apple Mail on macOS.",
   "mcpName": "io.github.jakobfigur/apple-mail-mcp",
   "author": "Jakob Figur",
