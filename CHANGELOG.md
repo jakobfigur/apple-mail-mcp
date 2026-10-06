@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented here.
 
+## 0.6.2 — 2026-10-06
+
+- Publishes under the maintainer's npm scope: `@jakobf1/apple-mail-mcp`.
+
 ## 0.6.1 — 2026-10-06
 
 - Shortens Registry metadata to comply with its 100-character description limit.

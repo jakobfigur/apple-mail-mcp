@@ -27,7 +27,7 @@ The MCP server itself is local. However, an MCP client may send tool results to 
 ### npm (recommended)
 
 ```bash
-npm install -g @jakobfigur/apple-mail-mcp
+npm install -g @jakobf1/apple-mail-mcp
 ```
 
 Then configure your MCP client with the installed command:
@@ -120,7 +120,7 @@ This project is local-only. It is not an SMTP server, does not manage credential
 
 ## Publishing and registry metadata
 
-The package is published as `@jakobfigur/apple-mail-mcp`. Its MCP Registry identity is `io.github.jakobfigur/apple-mail-mcp`; see [`server.json`](server.json) for portable install metadata.
+The package is published as `@jakobf1/apple-mail-mcp`. Its MCP Registry identity is `io.github.jakobfigur/apple-mail-mcp`; see [`server.json`](server.json) for portable install metadata.
 
 ## License
 

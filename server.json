@@ -3,7 +3,7 @@
   "name": "io.github.jakobfigur/apple-mail-mcp",
   "title": "Apple Mail MCP",
   "description": "Privacy-first local MCP for Apple Mail on macOS: inbox context, drafts, approvals, and follow-ups.",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "repository": {
     "url": "https://github.com/jakobfigur/apple-mail-mcp",
     "source": "github"
@@ -12,8 +12,8 @@
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
-      "identifier": "@jakobfigur/apple-mail-mcp",
-      "version": "0.6.1",
+      "identifier": "@jakobf1/apple-mail-mcp",
+      "version": "0.6.2",
       "transport": {
         "type": "stdio"
       }
